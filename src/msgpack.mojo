@@ -1,6 +1,5 @@
 """MessagePack wire encoder and tokenizer exposed through a small C ABI."""
 
-from std.algorithm import parallelize
 from std.sys.info import simd_width_of as simdwidthof
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
@@ -85,13 +84,10 @@ def _copy_bytes(
 
     var chunks = (length + COPY_CHUNK_SIZE - 1) // COPY_CHUNK_SIZE
 
-    @parameter
-    def copy_chunk(chunk: Int):
+    for chunk in range(chunks):
         var start = chunk * COPY_CHUNK_SIZE
         var amount = min(COPY_CHUNK_SIZE, length - start)
         _copy_bytes_serial(dst, dst_pos + start, src, src_pos + start, amount)
-
-    parallelize[copy_chunk](chunks, 4)
 
 
 def _get_u16(src: BPtr, pos: Int) -> UInt64:
