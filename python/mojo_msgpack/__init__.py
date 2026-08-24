@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from ._codec import _Decoder, encode
+from ._codec import (
+    _Decoder,
+    _NO_DIRECT_DECODE,
+    decode_binary,
+    decode_uint_array,
+    encode,
+)
 from .exceptions import *
 from .ext import ExtType, Timestamp
 
@@ -127,6 +133,15 @@ def unpackb(
     max_ext_len=-1,
 ):
     try:
+        direct_binary = decode_binary(packed, max_bin_len=max_bin_len)
+        if direct_binary is not _NO_DIRECT_DECODE:
+            return direct_binary
+        if list_hook is None:
+            direct = decode_uint_array(
+                packed, use_list=use_list, max_array_len=max_array_len
+            )
+            if direct is not None:
+                return direct
         return _Decoder(
             packed,
             object_hook=object_hook,

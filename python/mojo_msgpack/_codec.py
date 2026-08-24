@@ -14,6 +14,8 @@ NIL, FALSE, TRUE, UINT, SINT, FLOAT32, FLOAT64 = range(7)
 STRING, BINARY, ARRAY, MAP, EXT, RAW = range(7, 13)
 _MASK64 = (1 << 64) - 1
 _FLAT_ARRAY_THRESHOLD = 256
+_DIRECT_UINT_ARRAY_THRESHOLD = 256
+_NO_DIRECT_DECODE = object()
 
 
 class _Tape:
@@ -145,16 +147,25 @@ def _encode_int_list(value):
         raise OverflowError("array is too large")
     if not length:
         return b"\x90"
+    try:
+        storage = array("Q", value)
+        dtype = np.uint64
+        signed = False
+    except (OverflowError, TypeError):
+        try:
+            storage = array("q", value)
+            dtype = np.int64
+            signed = True
+        except (OverflowError, TypeError):
+            return None
     if not all(type(item) is int for item in value):
         return None
-    values = np.asarray(value)
-    if values.dtype.itemsize != 8 or values.dtype.kind not in "iu":
-        return None
+    values = np.frombuffer(storage, dtype=dtype)
     destination = np.empty(5 + 9 * length, dtype=np.uint8)
     written = lib().mmp_pack_int_array(
         addr(values, values.dtype),
         length,
-        values.dtype.kind == "i",
+        signed,
         addr(destination, np.uint8),
         destination.size,
     )
@@ -268,6 +279,8 @@ class _Decoder:
         if got != count:
             raise RuntimeError("Mojo tokenizer produced an unexpected token count")
         self.count = count
+        if count >= _FLAT_ARRAY_THRESHOLD and not np.all(self.types[1:count] == UINT):
+            self.types = self.types.tolist()
 
     def _check_limit(self, kind, length):
         limit = self.limits.get(kind, -1)
@@ -282,8 +295,6 @@ class _Decoder:
         if depth > 511:
             raise StackError("too deeply nested")
         kind = int(self.types[index])
-        value = int(self.values[index])
-        length = int(self.lengths[index])
         next_index = index + 1
         if kind == NIL:
             result = None
@@ -292,14 +303,18 @@ class _Decoder:
         elif kind == TRUE:
             result = True
         elif kind == UINT:
-            result = value
+            result = int(self.values[index])
         elif kind == SINT:
+            value = int(self.values[index])
             result = value - (1 << 64) if value >= 1 << 63 else value
         elif kind == FLOAT32:
+            value = int(self.values[index])
             result = struct.unpack("!f", struct.pack("!I", value))[0]
         elif kind == FLOAT64:
+            value = int(self.values[index])
             result = struct.unpack("!d", struct.pack("!Q", value))[0]
         elif kind in (STRING, BINARY):
+            length = int(self.lengths[index])
             self._check_limit(kind, length)
             start = int(self.offsets[index])
             payload = self.data[start : start + length]
@@ -309,6 +324,8 @@ class _Decoder:
                 else payload
             )
         elif kind == EXT:
+            value = int(self.values[index])
+            length = int(self.lengths[index])
             self._check_limit(kind, length)
             start = int(self.offsets[index])
             payload = self.data[start : start + length]
@@ -328,11 +345,19 @@ class _Decoder:
             else:
                 result = self.ext_hook(code, payload)
         elif kind == ARRAY:
+            value = int(self.values[index])
             self._check_limit(kind, value)
             if (
                 value >= _FLAT_ARRAY_THRESHOLD
                 and next_index + value <= self.count
-                and np.all(self.types[next_index : next_index + value] == UINT)
+                and (
+                    np.all(self.types[next_index : next_index + value] == UINT)
+                    if isinstance(self.types, np.ndarray)
+                    else all(
+                        kind == UINT
+                        for kind in self.types[next_index : next_index + value]
+                    )
+                )
             ):
                 items = self.values[next_index : next_index + value].tolist()
                 next_index += value
@@ -356,6 +381,7 @@ class _Decoder:
             if self.list_hook is not None:
                 result = self.list_hook(result)
         elif kind == MAP:
+            value = int(self.values[index])
             self._check_limit(kind, value)
             pairs = []
             for _ in range(value):
@@ -384,3 +410,56 @@ class _Decoder:
     def first(self):
         result, next_index = self.parse()
         return result, int(self.ends[next_index - 1])
+
+
+def decode_uint_array(packed, *, use_list=True, max_array_len=-1):
+    data = packed if type(packed) is bytes else bytes(packed)
+    size = len(data)
+    if not size:
+        return None
+    marker = data[0]
+    if 0x90 <= marker <= 0x9F:
+        count = marker & 15
+    elif marker == 0xDC and size >= 3:
+        count = int.from_bytes(data[1:3], "big")
+    elif marker == 0xDD and size >= 5:
+        count = int.from_bytes(data[1:5], "big")
+    else:
+        return None
+    if count < _DIRECT_UINT_ARRAY_THRESHOLD:
+        return None
+    if max_array_len is not None and max_array_len >= 0 and count > max_array_len:
+        raise ValueError(f"{count} exceeds configured limit")
+    source = np.frombuffer(data, dtype=np.uint8)
+    values = np.empty(count, dtype=np.uint64)
+    got = lib().mmp_unpack_uint_array(
+        addr(source, np.uint8), size, addr(values, np.uint64), count
+    )
+    if got != count:
+        return None
+    result = values.tolist()
+    return result if use_list else tuple(result)
+
+
+def decode_binary(packed, *, max_bin_len=-1):
+    data = packed if type(packed) is bytes else bytes(packed)
+    size = len(data)
+    if size < 2:
+        return _NO_DIRECT_DECODE
+    marker = data[0]
+    if marker == 0xC4:
+        payload_start = 2
+        length = data[1]
+    elif marker == 0xC5 and size >= 3:
+        payload_start = 3
+        length = int.from_bytes(data[1:3], "big")
+    elif marker == 0xC6 and size >= 5:
+        payload_start = 5
+        length = int.from_bytes(data[1:5], "big")
+    else:
+        return _NO_DIRECT_DECODE
+    if payload_start + length != size:
+        return _NO_DIRECT_DECODE
+    if max_bin_len is not None and max_bin_len >= 0 and length > max_bin_len:
+        raise ValueError(f"{length} exceeds configured limit")
+    return data[payload_start:]

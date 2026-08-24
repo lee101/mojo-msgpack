@@ -43,6 +43,7 @@ def main():
         for i in range(30_000)
     ]
     binary = bytes(range(256)) * 32_768
+    large_binary = bytes(range(256)) * 131_072
 
     integer_wire = msgpack.packb(integers)
     record_wire = msgpack.packb(records)
@@ -80,6 +81,11 @@ def main():
             "unpackb 8 MiB binary",
             lambda: mojo_msgpack.unpackb(binary_wire),
             lambda: msgpack.unpackb(binary_wire),
+        ),
+        (
+            "packb 32 MiB binary",
+            lambda: mojo_msgpack.packb(large_binary),
+            lambda: msgpack.packb(large_binary),
         ),
     ]
 

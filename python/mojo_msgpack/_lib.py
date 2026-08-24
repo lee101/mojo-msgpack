@@ -16,10 +16,12 @@ I = ctypes.c_int64
 B = ctypes.c_bool
 
 _SIGNATURES = {
+    "mmp_initialize_runtime": ([], None),
     "mmp_pack_size": ([I, I, I, I], I),
     "mmp_pack": ([I, I, I, I, I, I, I, I, I], I),
     "mmp_pack_int_array": ([I, I, B, I, I], I),
     "mmp_pack_payload": ([I, I, I, I, I], I),
+    "mmp_unpack_uint_array": ([I, I, I, I], I),
     "mmp_token_count": ([I, I], I),
     "mmp_tokenize": ([I, I, I, I, I, I, I, I], I),
 }
@@ -64,6 +66,7 @@ def lib():
             function = getattr(_library, name)
             function.argtypes = argtypes
             function.restype = restype
+        _library.mmp_initialize_runtime()
     return _library
 
 

@@ -86,21 +86,25 @@ object traversal and materialization. Relative values are
 
 | case | mojo-msgpack | msgpack 1.2.1 | relative | result |
 |---|---:|---:|---:|---|
-| packb 250k integers | 40.79 ms | 13.69 ms | 0.336x | slower |
-| unpackb 250k integers | 23.18 ms | 17.47 ms | 0.754x | slower |
-| packb 30k nested records | 283.13 ms | 14.87 ms | 0.053x | slower |
-| unpackb 30k nested records | 384.92 ms | 31.77 ms | 0.083x | slower |
-| packb 8 MiB binary | 1.52 ms | 1.92 ms | 1.261x | faster |
-| unpackb 8 MiB binary | 0.67 ms | 0.58 ms | 0.858x | slower |
+| packb 250k integers | 14.43 ms | 8.78 ms | 0.609x | slower |
+| unpackb 250k integers | 9.62 ms | 9.04 ms | 0.939x | slower |
+| packb 30k nested records | 295.08 ms | 14.35 ms | 0.049x | slower |
+| unpackb 30k nested records | 311.85 ms | 30.32 ms | 0.097x | slower |
+| packb 8 MiB binary | 1.49 ms | 1.81 ms | 1.215x | faster |
+| unpackb 8 MiB binary | 0.60 ms | 0.57 ms | 0.948x | slower |
+| packb 32 MiB binary | 37.10 ms | 58.83 ms | 1.585x | faster |
 
 The result is expected: upstream traverses Python objects inside one highly
 optimized C extension. This implementation's general path builds or consumes a
 NumPy token tape and then materializes Python objects, so Python work still
 dominates nested documents. Homogeneous integer lists bypass recursive tape
-construction during packing, and large unsigned-integer arrays have a direct
-materialization path during unpacking. Top-level payload inputs cross the FFI
-boundary as zero-copy NumPy views. Large payload copies use unaligned-safe SIMD
-with a scalar tail; payloads of at least 16 MiB are divided among four CPU workers.
+construction during packing using a zero-copy NumPy view over an `array` buffer,
+and large unsigned-integer arrays decode directly into one value buffer without
+building a five-array token tape. Heterogeneous decode tapes avoid unused scalar
+conversions during Python materialization. Top-level payload inputs cross the FFI
+boundary as zero-copy NumPy views. All payload copies use unaligned-safe SIMD with
+a scalar tail; top-level payloads of at least 16 MiB are split into 256 KiB chunks
+and dispatched to CPU workers with `max.algorithm.parallelize`.
 
 There is intentionally no GPU path. MessagePack marker handling, byte swapping,
 and payload copying have low arithmetic intensity, well below the roughly two

@@ -1,5 +1,7 @@
 """MessagePack wire encoder and tokenizer exposed through a small C ABI."""
 
+from max.algorithm import parallelize
+from std.runtime import initialize_runtime
 from std.sys.info import simd_width_of as simdwidthof
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
@@ -20,6 +22,11 @@ comptime EXT = 11
 comptime RAW = 12
 comptime PARALLEL_COPY_THRESHOLD = 16 << 20
 comptime COPY_CHUNK_SIZE = 1 << 18
+
+
+@export("mmp_initialize_runtime")
+def mmp_initialize_runtime() abi("C"):
+    initialize_runtime()
 
 
 def _put_u16(dst: BPtr, pos: Int, value: UInt64):
@@ -84,10 +91,13 @@ def _copy_bytes(
 
     var chunks = (length + COPY_CHUNK_SIZE - 1) // COPY_CHUNK_SIZE
 
-    for chunk in range(chunks):
+    @parameter
+    def copy_chunk(chunk: Int):
         var start = chunk * COPY_CHUNK_SIZE
         var amount = min(COPY_CHUNK_SIZE, length - start)
         _copy_bytes_serial(dst, dst_pos + start, src, src_pos + start, amount)
+
+    parallelize[copy_chunk](chunks)
 
 
 def _get_u16(src: BPtr, pos: Int) -> UInt64:
@@ -335,8 +345,7 @@ def mmp_pack(
                 dst[pos] = 0xdb
                 _put_u32(dst, pos + 1, length)
                 pos += 5
-            for j in range(Int(length)):
-                dst[pos + j] = payload[Int(offsets[i]) + j]
+            _copy_bytes_serial(dst, pos, payload, Int(offsets[i]), Int(length))
             pos += Int(length)
         elif kind == BINARY:
             if length <= 0xff:
@@ -351,8 +360,7 @@ def mmp_pack(
                 dst[pos] = 0xc6
                 _put_u32(dst, pos + 1, length)
                 pos += 5
-            for j in range(Int(length)):
-                dst[pos + j] = payload[Int(offsets[i]) + j]
+            _copy_bytes_serial(dst, pos, payload, Int(offsets[i]), Int(length))
             pos += Int(length)
         elif kind == ARRAY or kind == MAP:
             if value <= 15:
@@ -396,8 +404,7 @@ def mmp_pack(
                 pos += 5
             dst[pos] = UInt8(value)
             pos += 1
-            for j in range(Int(length)):
-                dst[pos + j] = payload[Int(offsets[i]) + j]
+            _copy_bytes_serial(dst, pos, payload, Int(offsets[i]), Int(length))
             pos += Int(length)
         else:
             return -1
@@ -527,6 +534,74 @@ def mmp_pack_payload(
         return -1
     _copy_bytes(dst, pos, src, 0, length)
     return pos + length
+
+
+@export("mmp_unpack_uint_array")
+def mmp_unpack_uint_array(
+    src_addr: Int,
+    size: Int,
+    values_addr: Int,
+    capacity: Int,
+) abi("C") -> Int:
+    if size < 1 or capacity < 0 or src_addr == 0 or values_addr == 0:
+        return -1
+    var src = BPtr(unsafe_from_address=src_addr)
+    var values = UPtr(unsafe_from_address=values_addr)
+    var marker = Int(src[0])
+    var pos = Int(1)
+    var count = Int(0)
+    if marker >= 0x90 and marker <= 0x9f:
+        count = marker & 15
+    elif marker == 0xdc:
+        if size < 3:
+            return -1
+        count = Int(_get_u16(src, 1))
+        pos = 3
+    elif marker == 0xdd:
+        if size < 5:
+            return -1
+        var wide_count = _get_u32(src, 1)
+        if wide_count > UInt64(capacity):
+            return -1
+        count = Int(wide_count)
+        pos = 5
+    else:
+        return -1
+    if count > capacity:
+        return -1
+
+    for i in range(count):
+        if pos >= size:
+            return -1
+        marker = Int(src[pos])
+        pos += 1
+        if marker <= 0x7f:
+            values[i] = UInt64(marker)
+        elif marker == 0xcc:
+            if not _need(pos, 1, size):
+                return -1
+            values[i] = UInt64(src[pos])
+            pos += 1
+        elif marker == 0xcd:
+            if not _need(pos, 2, size):
+                return -1
+            values[i] = _get_u16(src, pos)
+            pos += 2
+        elif marker == 0xce:
+            if not _need(pos, 4, size):
+                return -1
+            values[i] = _get_u32(src, pos)
+            pos += 4
+        elif marker == 0xcf:
+            if not _need(pos, 8, size):
+                return -1
+            values[i] = _get_u64(src, pos)
+            pos += 8
+        else:
+            return -1
+    if pos != size:
+        return -1
+    return count
 
 
 def _need(pos: Int, amount: Int, size: Int) -> Bool:

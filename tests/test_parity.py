@@ -82,6 +82,20 @@ def test_direct_payload_simd_tails():
         assert mojo.packb(value) == msgpack.packb(value)
 
 
+def test_general_tape_payload_simd_tails():
+    for length in range(130):
+        value = {"payload": bytes((index * 19) % 251 for index in range(length))}
+        assert mojo.packb(value) == msgpack.packb(value)
+
+
+@pytest.mark.parametrize("length", [255, 256, 257, 65537])
+def test_direct_uint_array_decode_threshold_and_tail(length):
+    value = list(range(length))
+    packed = msgpack.packb(value)
+    assert mojo.unpackb(packed) == value
+    assert mojo.unpackb(packed, use_list=False) == tuple(value)
+
+
 def test_flat_integer_array_fast_path_boundaries_and_fallback():
     value = [
         -(1 << 63),
