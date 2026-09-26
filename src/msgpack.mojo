@@ -1,6 +1,5 @@
 """MessagePack wire encoder and tokenizer exposed through a small C ABI."""
 
-from max.algorithm import parallelize
 from std.runtime import initialize_runtime
 from std.sys.info import simd_width_of as simdwidthof
 
@@ -20,8 +19,6 @@ comptime ARRAY = 9
 comptime MAP = 10
 comptime EXT = 11
 comptime RAW = 12
-comptime PARALLEL_COPY_THRESHOLD = 16 << 20
-comptime COPY_CHUNK_SIZE = 1 << 18
 
 
 @export("mmp_initialize_runtime")
@@ -85,19 +82,9 @@ def _copy_bytes(
     src_pos: Int,
     length: Int,
 ):
-    if length < PARALLEL_COPY_THRESHOLD:
-        _copy_bytes_serial(dst, dst_pos, src, src_pos, length)
-        return
-
-    var chunks = (length + COPY_CHUNK_SIZE - 1) // COPY_CHUNK_SIZE
-
-    @parameter
-    def copy_chunk(chunk: Int):
-        var start = chunk * COPY_CHUNK_SIZE
-        var amount = min(COPY_CHUNK_SIZE, length - start)
-        _copy_bytes_serial(dst, dst_pos + start, src, src_pos + start, amount)
-
-    parallelize[copy_chunk](chunks)
+    # Byte-for-byte payload transfer is a pure bandwidth copy, far under the
+    # roughly two flops per byte where threading starts to pay.
+    _copy_bytes_serial(dst, dst_pos, src, src_pos, length)
 
 
 def _get_u16(src: BPtr, pos: Int) -> UInt64:
